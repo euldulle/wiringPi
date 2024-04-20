@@ -1,5 +1,5 @@
-AC_PREREQ([2.69])
-AC_INIT([odroid-wiringpi], [3.0], [tobetter@gmail.com])
+AC_PREREQ([2.71])
+AC_INIT([odroid-wiringpi],[3.0],[tobetter@gmail.com])
 AC_CONFIG_SRCDIR([Makefile.am])
 AC_CONFIG_HEADERS([config.h])
 
