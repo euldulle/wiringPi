@@ -33,12 +33,17 @@
 #include <sys/stat.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <iniparser.h>
 
 #include <wiringPi.h>
 
 #include "../version.h"
 
 #define MAX_COMMAND_SIZE 1024
+
+#define INFOCUS 0
+#define OUTFOCUS 1
+
 int port;
 typedef struct {
 int nr;
@@ -63,18 +68,87 @@ int step_inc=1;
 int old_dir=1;
 int step_pos=0;
 int ustep_count=0;
-double steps_per_um=0.0104;
-int usteps_per_step=32;
-uint32_t delay_step;
-double usteps_per_um;
-double backlash_param=(double)250;
 
+uint32_t usteps_per_mm=470;
+uint32_t usteps_per_step=32;
+uint32_t delay_step;
+uint32_t backlash[2]={
+    200, // [0] = backlash when going from OUTFOCUS to INFOCUS
+    240  // [1] = backlash when going from INFOCUS to OUTFOCUS
+};
+                                   
 #ifndef TRUE
 #  define	TRUE	(1==1)
 #  define	FALSE	(1==2)
 #endif
 
 int wpMode ;
+
+// Function to read parameters from .ini file
+void read_ini_file(const char *filename, int *params) {
+    // Load .ini file
+    dictionary *ini = iniparser_load(filename);
+    if (ini == NULL) {
+        fprintf(stderr, "Error: cannot open %s\n", filename);
+        exit(EXIT_FAILURE);
+    }
+
+    // Read integer parameters
+    steps_per_mm = iniparser_getint(ini, "focuser:steps_per_mm", -1);
+    backlash[0] = iniparser_getint(ini, "focuser:backlash0", -1);
+    backlash[1] = iniparser_getint(ini, "focuser:backlash1", -1);
+    delay_step = iniparser_getint(ini, "focuser:delay", -1);
+    dir.nr = iniparser_getint(ini, "focuser:dir-pin", -1);
+    step.nr = iniparser_getint(ini, "focuser:step-pin", -1);
+    enable.nr = iniparser_getint(ini, "focuser:enable-pin", -1);
+    port= iniparser_getint(ini, "focuser:port", -1);
+
+    // Free memory allocated by iniparser
+    iniparser_freedict(ini);
+}
+
+// Function to write parameters to .ini file
+void write_ini_file(const char *filename, const int *params) {
+    FILE *f = fopen(filename, "w");
+    if (f == NULL) {
+        fprintf(stderr, "Error: cannot write to %s\n", filename);
+        exit(EXIT_FAILURE);
+    }
+    fprintf(f, "[focuser]\n");
+    fprintf(f, "steps_per_mm = %d\n", steps_per_mm);
+    fprintf(f, "backlash0 = %d\n", backlash[0]);
+    fprintf(f, "backlash1 = %d\n", backlash[1]);
+    fprintf(f, "delay = %d\n", delay_step);
+    fprintf(f, "dir-pin = %d\n", dir.nr);
+    fprintf(f, "step-pin = %d\n", step.nr);
+    fprintf(f, "enable-pin = %d\n", enable.nr);
+    fprintf(f, "port = %d\n", port);
+    fclose(f);
+}
+
+//   int main() {
+//       const char *filename = "config.ini";
+//       int params[6];
+//
+//       // Read parameters from .ini file
+//       read_ini_file(filename, params);
+//
+//       // Print read parameters
+//       printf("Parameters read from %s:\n", filename);
+//       for (int i = 0; i < 6; i++) {
+//           printf("Parameter %d: %d\n", i + 1, params[i]);
+//       }
+//
+//       // Manipulate parameters as needed
+//
+//       // Write parameters back to .ini file (optional)
+//       // Note: This will overwrite the original file
+//       write_ini_file(filename, params);
+//
+//       printf("Parameters written back to %s.\n", filename);
+//
+//       return EXIT_SUCCESS;
+//   }
 
 void gprint(gpin pin){
     fprintf(stderr," %4s #%d = %d\n", pin.name, pin.nr, pin.state);
@@ -83,7 +157,7 @@ void gprint(gpin pin){
 void gwrite(gpin *pin, int state ){
     digitalWrite(pin->nr, state);
     pin->state=state;
-    gprint(*pin);
+    //gprint(*pin);
     }
 
 void gclr(gpin *pin){
@@ -104,21 +178,27 @@ void gtoggle(gpin *pin){
     }
 
 void do_move(int newdir, uint32_t microns){
-    static int olddir;
-    uint32_t count;
+    static int olddir, pos;
+    int step_inc;
+    int32_t count;
+
     gclr(&enable);
 
-    count=usteps_per_um*microns;
-
-    if (0 && old_dir!=newdir){
-        count=count+backlash_param;
+    count=(usteps_per_mm*microns)/1000;
+    if (old_dir!=newdir){
+        count=count+backlash[newdir];
     }
     old_dir=newdir;
-
-    if (newdir)
+    fprintf(stderr,"initial %d %d\n", count, microns);
+    
+    if (newdir==INFOCUS){  // infocus 
+        step_inc=-1;
         gclr(&dir);
-    else
+    }
+    else{                   // outfocus
+        step_inc=1;
         gset(&dir);
+    }
 
     while (count>0){
         --count;
@@ -126,8 +206,10 @@ void do_move(int newdir, uint32_t microns){
         usleep(delay_step);
         gclr(&step);
         usleep(delay_step);
+        pos=pos+step_inc;
         }
     //step_pos=(step_pos+
+    fprintf(stderr, "ustep pos # %d\n", pos);
     gset(&enable);
 }
 
@@ -140,11 +222,23 @@ void handle_command(int client_socket, const char *command) {
 
     if (strcasecmp(action, "IF") == 0) {
         snprintf(response,128,"processing %s %d...\n", action, param);
-        do_move(0,param);
+        do_move(INFOCUS,param);
         send(client_socket, response, strlen(response), 0);
     } else if (strcasecmp(action, "OF") == 0) {
         snprintf(response,128,"processing %s %d...\n", action, param);
-        do_move(1,param);
+        do_move(OUTFOCUS,param);
+        send(client_socket, response, strlen(response), 0);
+    } else if (strcasecmp(action, "Um") == 0) {
+        snprintf(response,128,"usteps / mm  = %d\n", param);
+        usteps_per_mm=param;
+        send(client_socket, response, strlen(response), 0);
+    } else if (strcasecmp(action, "OI") == 0) {
+        snprintf(response,128,"OI backlash = %d\n", param);
+        backlash[0]=param;
+        send(client_socket, response, strlen(response), 0);
+    } else if (strcasecmp(action, "IO") == 0) {
+        snprintf(response,128,"IO backlash = %d\n", param);
+        backlash[1]=param;
         send(client_socket, response, strlen(response), 0);
     } else if (strcasecmp(action, "TOG") == 0) {
         snprintf(response,128,"processing %s %d...\n", action, param);
@@ -169,7 +263,7 @@ void handle_command(int client_socket, const char *command) {
         snprintf(response, 128, "Unknown command: @%s@", command);
         send(client_socket, response, strlen(response), 0);
     }
-    fprintf(stderr,"server finished processing @%s@\n", response);
+    //fprintf(stderr,"server finished processing @%s@\n", response);
 
     gread(&step);
     gread(&dir);
@@ -178,6 +272,9 @@ void handle_command(int client_socket, const char *command) {
     gprint(step);
     gprint(dir);
     gprint(enable);
+    fprintf(stderr, " backlash oi  : %d usteps\n", backlash[INFOCUS]);
+    fprintf(stderr, " backlash io  : %d usteps\n", backlash[OUTFOCUS]);
+    fprintf(stderr, " steps per mm : %d steps \n", usteps_per_mm);
 }
 
 /*
@@ -213,10 +310,10 @@ int main (int argc, char *argv []){
     pinMode(dir.nr,OUTPUT);
     pinMode(enable.nr,OUTPUT);
 
-    delay_step=500000/usteps_per_step;
-    delay_step=10000;
-    usteps_per_um=steps_per_um*usteps_per_step;
-    backlash_param=5*(double)usteps_per_step;
+    delay_step=5000/usteps_per_step;
+    
+    //delay_step=10000;
+    //backlash_param=5*(double)usteps_per_step;
 
     // Create socket
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
