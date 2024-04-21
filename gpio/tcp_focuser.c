@@ -65,7 +65,7 @@ int step_pos=0;
 int ustep_count=0;
 double steps_per_um=0.0104;
 int usteps_per_step=32;
-double delay_step;
+uint32_t delay_step;
 double usteps_per_um;
 double backlash_param=(double)250;
 
@@ -77,12 +77,13 @@ double backlash_param=(double)250;
 int wpMode ;
 
 void gprint(gpin pin){
-    fprintf(stderr," %+4s #%d = %d\n", pin.name, pin.nr, pin.state);
+    fprintf(stderr," %4s #%d = %d\n", pin.name, pin.nr, pin.state);
     }
 
 void gwrite(gpin *pin, int state ){
     digitalWrite(pin->nr, state);
-    pin->nr=state;
+    pin->state=state;
+    gprint(*pin);
     }
 
 void gclr(gpin *pin){
@@ -102,81 +103,63 @@ void gtoggle(gpin *pin){
     gwrite(pin, !gread(pin));
     }
 
-/*
- * doVersion:
- *	Handle the ever more complicated version command and print out
- *	some usefull information.
- *********************************************************************************
- */
-static void doVersion (char *argv [])
-{
-	int model, rev, mem, maker, warranty ;
-	struct stat statBuf ;
-	char name [80] ;
-	FILE *fd ;
+void do_move(int newdir, uint32_t microns){
+    static int olddir;
+    uint32_t count;
+    gclr(&enable);
 
-	int vMaj;
-	char *vMin[32];
+    count=usteps_per_um*microns;
 
-	wiringPiVersion (&vMaj, vMin) ;
-	printf ("gpio version: %d.%s\n", vMaj, *vMin) ;
-	printf ("Copyright (c) 2012-2017 Gordon Henderson, 2017-2020 Hardkernel Co., Ltd.\n") ;
-	printf ("This is free software with ABSOLUTELY NO WARRANTY.\n") ;
-	printf ("For details type: %s -warranty\n", argv [0]) ;
-	printf ("\n") ;
-	piBoardId (&model, &rev, &mem, &maker, &warranty) ;
+    if (0 && old_dir!=newdir){
+        count=count+backlash_param;
+    }
+    old_dir=newdir;
 
-	printf ("ODROID Board Details:\n") ;
-	printf ("  Type: %s, Revision: %s, Memory: %dMB\n" \
-	        "  Maker: %s, Chip-Vendor: %s\n",
-		piModelNames [model],
-		piRevisionNames [rev],
-		piMemorySize [mem],
-		"Hardkernel",
-		piMakerNames [maker]);
+    if (newdir)
+        gclr(&dir);
+    else
+        gset(&dir);
 
-	// Show current kernel version
-	printf("  * Current devices' kernel version: %s\n", kernelVersion->release);
-
-	// Check for device tree
-	if (stat ("/proc/device-tree", &statBuf) == 0)	// We're on a devtree system ...
-		printf ("  * Device tree is enabled.\n") ;
-
-	// Output Kernel idea of board type
-	if (stat ("/proc/device-tree/model", &statBuf) == 0) {
-		if ((fd = fopen ("/proc/device-tree/model", "r")) != NULL) {
-			if (fgets (name, 80, fd) == NULL)
-				fprintf(stderr, "Unable to read from the file descriptor: %s \n", strerror(errno));
-			fclose (fd) ;
-			printf ("  *--> %s\n", name) ;
-		}
-	}
-
-	// User level GPIO is GO
-	if (stat ("/dev/gpiomem", &statBuf) == 0)
-		printf ("  * Supports user-level GPIO access.\n") ;
-	else
-		printf ("  * Root or sudo required for GPIO access.\n") ;
+    while (count>0){
+        --count;
+        gset(&step);
+        usleep(delay_step);
+        gclr(&step);
+        usleep(delay_step);
+        }
+    //step_pos=(step_pos+
+    gset(&enable);
 }
 
 void handle_command(int client_socket, const char *command) {
     char response[128], action[16];
+    uint32_t param;
     int pin, state, nbfield; 
 
-    nbfield=sscanf(command, "%s %s %d", action );
+    nbfield=sscanf(command, "%s %d", action, &param );
 
-    if (strcasecmp(action, "IN") == 0) {
-        snprintf(response,128,"Received GET command");
+    if (strcasecmp(action, "IF") == 0) {
+        snprintf(response,128,"processing %s %d...\n", action, param);
+        do_move(0,param);
         send(client_socket, response, strlen(response), 0);
-    } else if (strcasecmp(action, "OUT") == 0) {
-        // Perform action for SET command
-        snprintf(response,128,"Received SET command");
-        digitalWrite(pin, state);
+    } else if (strcasecmp(action, "OF") == 0) {
+        snprintf(response,128,"processing %s %d...\n", action, param);
+        do_move(1,param);
         send(client_socket, response, strlen(response), 0);
-    } else if (strcasecmp(action, "REV") == 0) {
-        // Perform action for SET command
-        snprintf(response,128,"Received SET command");
-        digitalWrite(pin, state);
+    } else if (strcasecmp(action, "TOG") == 0) {
+        snprintf(response,128,"processing %s %d...\n", action, param);
+        switch(param) {
+            case 0:
+                gtoggle(&dir);
+                break;
+            case 1:
+                gtoggle(&step);
+                break;
+            case 2:
+                gtoggle(&enable);
+                break;
+        }
+                
         send(client_socket, response, strlen(response), 0);
     } else if (strcasecmp(action, "EXIT") == 0) {
         snprintf(response,128,"Closing connection");
@@ -226,7 +209,12 @@ int main (int argc, char *argv []){
 
     wiringPiSetupGpio () ;
     wpMode = MODE_GPIO ;
-    delay_step=0.005/usteps_per_step;
+    pinMode(step.nr,OUTPUT);
+    pinMode(dir.nr,OUTPUT);
+    pinMode(enable.nr,OUTPUT);
+
+    delay_step=500000/usteps_per_step;
+    delay_step=10000;
     usteps_per_um=steps_per_um*usteps_per_step;
     backlash_param=5*(double)usteps_per_step;
 
